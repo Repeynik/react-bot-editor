@@ -1,0 +1,585 @@
+import React, {
+  useCallback,
+  useRef,
+  useState,
+  useEffect,
+} from "react";
+import ReactFlow, {
+  ReactFlowProvider,
+  useNodesState,
+  useEdgesState,
+  addEdge,
+  Controls,
+  MiniMap,
+  Background,
+} from "reactflow";
+import "reactflow/dist/style.css";
+import "./App.css";
+import {
+  fromScenario,
+  toScenario,
+  createDefaultDataForType,
+} from "./utils/scenarioUtils";
+import { validateScenario } from "./utils/validation";
+import ChatPreview from "./components/ChatPreview";
+import BotsManager from "./components/BotsManager";
+import StartNode from "./components/nodes/StartNode";
+import FinalNode from "./components/nodes/FinalNode";
+import MessageNode from "./components/nodes/MessageNode";
+import InputNode from "./components/nodes/InputNode";
+import ConditionNode from "./components/nodes/ConditionNode";
+import ChoiceNode from "./components/nodes/ChoiceNode";
+import ApiNode from "./components/nodes/ApiNode";
+import MessageInspector from "./components/inspectors/MessageInspector";
+import InputInspector from "./components/inspectors/InputInspector";
+import ConditionInspector from "./components/inspectors/ConditionInspector";
+import ChoiceInspector from "./components/inspectors/ChoiceInspector";
+import ApiInspector from "./components/inspectors/ApiInspector";
+import DefaultInspector from "./components/inspectors/DefaultInspector";
+
+const nodeTypes = {
+  start: StartNode,
+  final: FinalNode,
+  message: MessageNode,
+  input: InputNode,
+  condition: ConditionNode,
+  choice: ChoiceNode,
+  api: ApiNode,
+};
+
+function App() {
+  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const reactFlowWrapper = useRef(null);
+
+  const reactFlowInstance = useRef(null);
+  const [showInspectorModal, setShowInspectorModal] = useState(false);
+
+  const [botName, setBotName] = useState("Bot");
+  const [botToken, setBotToken] = useState("");
+  const [globalVariables, setGlobalVariables] = useState("");
+  const [showBotSettings, setShowBotSettings] = useState(false);
+
+  const [editingEdgeId, setEditingEdgeId] = useState(null);
+
+  const [view, setView] = useState("editor");
+  const [bots, setBots] = useState([]);
+
+  const onConnect = useCallback(
+    (params) => setEdges((eds) => addEdge(params, eds)),
+    [setEdges]
+  );
+
+  const onDragOver = useCallback((event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }, []);
+
+  const onDrop = useCallback(
+    (event) => {
+      event.preventDefault();
+      const type = event.dataTransfer.getData("application/reactflow");
+      if (!type) return;
+
+      const bounds = reactFlowWrapper.current.getBoundingClientRect();
+      const instance = reactFlowInstance.current;
+      const position = instance
+        ? instance.project({
+            x: event.clientX - bounds.left,
+            y: event.clientY - bounds.top,
+          })
+        : { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+      const id = crypto.randomUUID();
+      const data = createDefaultDataForType(type);
+      const newNode = {
+        id,
+        type,
+        position,
+        data,
+      };
+      setNodes((nds) => nds.concat(newNode));
+    },
+    [setNodes]
+  );
+
+  const onNodesDelete = useCallback(
+    (deleted) => {
+      setNodes((nds) => nds.filter((n) => !deleted.some((d) => d.id === n.id)));
+      setEdges((eds) =>
+        eds.filter(
+          (e) => !deleted.some((d) => e.source === d.id || e.target === d.id)
+        )
+      );
+      setSelectedNodeId((sel) =>
+        deleted.some((d) => d.id === sel) ? null : sel
+      );
+    },
+    [setNodes, setEdges]
+  );
+
+  const onEdgesDelete = useCallback(
+    (deleted) => {
+      setEdges((eds) => eds.filter((e) => !deleted.some((d) => d.id === e.id)));
+    },
+    [setEdges]
+  );
+
+  const onNodeContextMenu = useCallback((event, node) => {
+    event.preventDefault();
+    setSelectedNodeId(node.id);
+    setShowInspectorModal(true);
+  }, []);
+
+  const onEdgeContextMenu = useCallback(
+    (event, edge) => {
+      event.preventDefault();
+      const ok = window.confirm("Удалить соединение?");
+      if (ok) {
+        setEdges((eds) => eds.filter((e) => e.id !== edge.id));
+      }
+    },
+    [setEdges]
+  );
+
+  const onEdgeDoubleClick = useCallback((event, edge) => {
+    event.preventDefault();
+    setEditingEdgeId(edge.id);
+  }, []);
+
+  const onNodeClick = useCallback((event, node) => {
+    setSelectedNodeId(node.id);
+  }, []);
+
+  const closeInspectorModal = useCallback(() => {
+    setShowInspectorModal(false);
+  }, []);
+
+  const deleteSelectedNode = useCallback(() => {
+    if (!selectedNodeId) return;
+    const ok = window.confirm("Удалить блок и все его соединения?");
+    if (!ok) return;
+    setNodes((nds) => nds.filter((n) => n.id !== selectedNodeId));
+    setEdges((eds) =>
+      eds.filter(
+        (e) => e.source !== selectedNodeId && e.target !== selectedNodeId
+      )
+    );
+    setSelectedNodeId(null);
+    setShowInspectorModal(false);
+  }, [selectedNodeId, setNodes, setEdges]);
+
+  const extractUsedVariables = useCallback(() => {
+    const vars = new Set();
+    if (globalVariables) {
+      globalVariables.split("\n").forEach((v) => {
+        const trimmed = v.trim();
+        if (trimmed) vars.add(trimmed);
+      });
+    }
+    nodes.forEach((node) => {
+      if (node.type === "input" && node.data.variableName) {
+        vars.add(node.data.variableName);
+      }
+    });
+    return Array.from(vars).sort();
+  }, [nodes, globalVariables]);
+
+  useEffect(() => {
+    const stored = localStorage.getItem("bots");
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) setBots(parsed);
+      } catch (e) {
+        console.error("Failed to parse bots from localStorage", e);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("bots", JSON.stringify(bots));
+    } catch (e) {}
+  }, [bots]);
+
+  const saveCurrentBot = () => {
+    const scenario = toScenario(nodes, edges);
+    scenario.BotName = botName;
+    scenario.Token = botToken;
+    scenario.GlobalVariables = globalVariables
+      .split("\n")
+      .filter((v) => v.trim());
+    const { valid, errors } = validateScenario(
+      nodes,
+      edges,
+      scenario.GlobalVariables
+    );
+    if (!valid) {
+      alert("Ошибки в конфигурации:\n" + errors.join("\n"));
+      return;
+    }
+    const name = prompt("Введите имя бота", scenario.BotName || "Новый бот");
+    if (!name) return;
+
+    if (bots.some((b) => b.name === name)) {
+      const new_bots = bots.map((b) => {
+        if (b.name === name) {
+          return { ...b, scenario };
+        }
+        return b;
+      });
+      setBots(new_bots);
+      alert("Бот сохранён.");
+      return;
+    }
+
+    const id = crypto.randomUUID();
+    setBots((bs) => [...bs, { id, name, scenario }]);
+    alert("Бот сохранён.");
+  };
+
+  const handleValidate = () => {
+    const vars = globalVariables.split("\n").filter((v) => v.trim());
+    const { valid, errors } = validateScenario(nodes, edges, vars);
+    if (valid) {
+      alert("Конфигурация корректна");
+    } else {
+      alert("Ошибки:\n" + errors.join("\n"));
+    }
+  };
+
+  const handleSelectBot = (bot) => {
+    const { nodes: newNodes, edges: newEdges } = fromScenario(bot.scenario);
+    setNodes(newNodes);
+    setEdges(newEdges);
+    setSelectedNodeId(null);
+    setBotName(bot.scenario.BotName || bot.name);
+    setBotToken(bot.scenario.Token || "");
+    if (
+      bot.scenario.GlobalVariables &&
+      Array.isArray(bot.scenario.GlobalVariables)
+    ) {
+      setGlobalVariables(bot.scenario.GlobalVariables.join("\n"));
+    } else {
+      setGlobalVariables("");
+    }
+    setView("editor");
+  };
+
+  const handleNewBot = (name) => {
+    setNodes([]);
+    setEdges([]);
+    setSelectedNodeId(null);
+    setBotName(name || "Bot");
+    setBotToken("");
+    setGlobalVariables("");
+    setView("editor");
+  };
+
+  const handleExport = () => {
+    const scenario = toScenario(nodes, edges);
+    scenario.BotName = botName;
+    scenario.Token = botToken;
+    scenario.GlobalVariables = globalVariables
+      .split("\n")
+      .filter((v) => v.trim());
+    const blob = new Blob([JSON.stringify(scenario, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "bot-scenario.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const fileInputRef = useRef(null);
+  const handleImportClick = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.click();
+    }
+  };
+  const handleFileChange = (event) => {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const json = JSON.parse(reader.result);
+        const { nodes: newNodes, edges: newEdges } = fromScenario(json);
+        setNodes(newNodes);
+        setEdges(newEdges);
+        setSelectedNodeId(null);
+        if (json.BotName) setBotName(json.BotName);
+        if (json.Token) setBotToken(json.Token);
+        if (json.GlobalVariables && Array.isArray(json.GlobalVariables)) {
+          setGlobalVariables(json.GlobalVariables.join("\n"));
+        }
+      } catch (e) {
+        alert("Ошибка загрузки сценария: " + e.message);
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = "";
+  };
+
+  const updateNodeData = (id, patch) => {
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (n.id === id) {
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              ...patch,
+            },
+          };
+        }
+        return n;
+      })
+    );
+  };
+
+  const renderInspector = () => {
+    const node = nodes.find((n) => n.id === selectedNodeId);
+    if (!node) return <div>Выберите блок для редактирования</div>;
+    const usedVars = extractUsedVariables();
+    switch (node.type) {
+      case "message":
+        return (
+          <MessageInspector
+            node={node}
+            updateNodeData={updateNodeData}
+            usedVars={usedVars}
+          />
+        );
+      case "input":
+        return <InputInspector node={node} updateNodeData={updateNodeData} />;
+      case "condition":
+        return (
+          <ConditionInspector
+            node={node}
+            updateNodeData={updateNodeData}
+            usedVars={usedVars}
+          />
+        );
+      case "choice":
+        return (
+          <ChoiceInspector
+            node={node}
+            updateNodeData={updateNodeData}
+            usedVars={usedVars}
+          />
+        );
+      case "api":
+        return <ApiInspector node={node} updateNodeData={updateNodeData} />;
+      default:
+        return <DefaultInspector />;
+    }
+  };
+
+  if (view === "manager") {
+    return (
+      <div className="app">
+        <BotsManager
+          bots={bots}
+          setBots={setBots}
+          onSelectBot={handleSelectBot}
+          onNewBot={handleNewBot}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <ReactFlowProvider>
+      <div className="app">
+        <div className="sidebar">
+          <h3>Блоки</h3>
+          {[
+            "start",
+            "final",
+            "message",
+            "input",
+            "condition",
+            "choice",
+            "api",
+          ].map((t) => (
+            <div
+              key={t}
+              className="block-item"
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.setData("application/reactflow", t);
+                e.dataTransfer.effectAllowed = "move";
+              }}
+            >
+              {t}
+            </div>
+          ))}
+          <button onClick={handleImportClick}>Импорт</button>
+          <button onClick={handleExport}>Экспорт</button>
+          <button onClick={() => setShowBotSettings(true)} className="mt8">
+            Параметры
+          </button>
+          <button onClick={saveCurrentBot} className="mt8">
+            Сохранить бота
+          </button>
+          <button onClick={() => setView("manager")} className="mt8">
+            Мои боты
+          </button>
+          <button onClick={handleValidate} className="mt8">
+            Проверить
+          </button>
+          <input
+            type="file"
+            accept="application/json"
+            className="hidden-input"
+            ref={fileInputRef}
+            onChange={handleFileChange}
+          />
+        </div>
+        <div
+          className="content"
+          ref={reactFlowWrapper}
+          onDrop={onDrop}
+          onDragOver={onDragOver}
+        >
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            onNodeClick={onNodeClick}
+            onNodeContextMenu={onNodeContextMenu}
+            onEdgeContextMenu={onEdgeContextMenu}
+            onEdgeDoubleClick={onEdgeDoubleClick}
+            onNodesDelete={onNodesDelete}
+            onEdgesDelete={onEdgesDelete}
+            onInit={(instance) => (reactFlowInstance.current = instance)}
+            fitView
+          >
+            <MiniMap />
+            <Controls />
+            <Background variant="dots" gap={16} size={1} />
+          </ReactFlow>
+        </div>
+
+        {editingEdgeId && (
+          <div className="modal-overlay" onClick={() => setEditingEdgeId(null)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <h3>Редактирование соединения</h3>
+              <p className="muted">
+                Выберите новый целевой узел для этого соединения:
+              </p>
+              <div className="edge-list">
+                {nodes.map((node) => {
+                  const edge = edges.find((e) => e.id === editingEdgeId);
+                  return (
+                    <button
+                      key={node.id}
+                      onClick={() => {
+                        setEdges((eds) =>
+                          eds.map((e) =>
+                            e.id === editingEdgeId
+                              ? { ...e, target: node.id }
+                              : e
+                          )
+                        );
+                        setEditingEdgeId(null);
+                      }}
+                      className={`edge-target-button ${
+                        edge?.target === node.id ? "selected" : ""
+                      }`}
+                    >
+                      {node.data.label} ({node.type})
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                onClick={() => setEditingEdgeId(null)}
+                className="btn-cancel"
+              >
+                Отмена
+              </button>
+            </div>
+          </div>
+        )}
+
+        {showInspectorModal && (
+          <div
+            className="modal-overlay"
+            onClick={() => setShowInspectorModal(false)}
+          >
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <strong>Редактирование блока</strong>
+                <div>
+                  <button onClick={closeInspectorModal}>Закрыть</button>
+                  <button onClick={deleteSelectedNode}>Удалить блок</button>
+                </div>
+              </div>
+              <div>{renderInspector()}</div>
+            </div>
+          </div>
+        )}
+
+        {showBotSettings && (
+          <div
+            className="modal-overlay"
+            onClick={() => setShowBotSettings(false)}
+          >
+            <div className="modal" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <strong>Глобальные параметры</strong>
+                <button onClick={() => setShowBotSettings(false)}>
+                  Закрыть
+                </button>
+              </div>
+
+              <label>
+                <strong>Имя бота</strong>
+                <input
+                  type="text"
+                  value={botName}
+                  onChange={(e) => setBotName(e.target.value)}
+                />
+              </label>
+
+              <label>
+                <strong>Токен</strong>
+                <textarea
+                  rows="3"
+                  value={botToken}
+                  onChange={(e) => setBotToken(e.target.value)}
+                />
+              </label>
+
+              <label>
+                <strong>Глобальные переменные (одна в строке)</strong>
+                <textarea
+                  rows="5"
+                  value={globalVariables}
+                  onChange={(e) => setGlobalVariables(e.target.value)}
+                  placeholder="var1&#10;var2&#10;user_name"
+                />
+              </label>
+            </div>
+          </div>
+        )}
+      </div>
+      <ChatPreview
+        nodes={nodes}
+        edges={edges}
+        globalVariables={globalVariables.split("\n").filter((v) => v.trim())}
+      />
+    </ReactFlowProvider>
+  );
+}
+
+export default App;
